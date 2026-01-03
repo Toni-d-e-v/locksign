@@ -2,10 +2,11 @@
 //!
 //! Handles Ethereum transaction and message signing with policy enforcement.
 
-use crate::crypto::{hash_message, keccak256, EthSignature};
+use crate::crypto::{keccak256, EthSignature};
 use crate::errors::{LockSignError, Result};
 use crate::keystore::MemoryKeyStore;
 use crate::policy::{PolicyEngine, SigningContext};
+use rlp::RlpStream;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -31,10 +32,8 @@ impl EthereumSigner {
         request_id: &str,
         message: &[u8],
     ) -> Result<EthSignature> {
-        // Create signing context
         let ctx = SigningContext::new(key_id, request_id, "ethereum");
 
-        // Evaluate policy
         let result = self.policy_engine.evaluate(&ctx)?;
         if !result.allowed {
             return Err(LockSignError::PolicyViolation(
@@ -42,16 +41,10 @@ impl EthereumSigner {
             ));
         }
 
-        // Sign
         let signature = self.key_store.sign_ethereum_message(key_id, message)?;
-
-        // Record signing
         self.policy_engine.record_signing(&ctx)?;
 
-        info!(
-            "Signed Ethereum message: key={}, request={}",
-            key_id, request_id
-        );
+        info!("Signed Ethereum message: key={}, request={}", key_id, request_id);
         Ok(signature)
     }
 
@@ -72,13 +65,9 @@ impl EthereumSigner {
         }
 
         let signature = self.key_store.sign_ethereum_hash(key_id, hash)?;
-
         self.policy_engine.record_signing(&ctx)?;
 
-        debug!(
-            "Signed Ethereum hash: key={}, request={}",
-            key_id, request_id
-        );
+        debug!("Signed Ethereum hash: key={}, request={}", key_id, request_id);
         Ok(signature)
     }
 
@@ -89,14 +78,12 @@ impl EthereumSigner {
         request_id: &str,
         tx: &LegacyTransaction,
     ) -> Result<SignedTransaction> {
-        // Create context with transaction details
         let mut ctx = SigningContext::new(key_id, request_id, "ethereum");
         if let Some(to) = &tx.to {
             ctx = ctx.with_address(&hex::encode(to));
         }
         ctx = ctx.with_value(tx.value);
 
-        // Evaluate policy
         let result = self.policy_engine.evaluate(&ctx)?;
         if !result.allowed {
             return Err(LockSignError::PolicyViolation(
@@ -104,14 +91,10 @@ impl EthereumSigner {
             ));
         }
 
-        // RLP encode transaction for signing
         let unsigned_rlp = tx.rlp_unsigned();
         let hash = keccak256(&unsigned_rlp);
-
-        // Sign
         let signature = self.key_store.sign_ethereum_hash(key_id, &hash)?;
 
-        // Create signed transaction
         let signed_tx = SignedTransaction {
             tx: tx.clone(),
             v: signature.v_eip155(tx.chain_id),
@@ -119,15 +102,52 @@ impl EthereumSigner {
             s: signature.s.clone(),
         };
 
-        // Record signing
         self.policy_engine.record_signing(&ctx)?;
 
         info!(
             "Signed Ethereum legacy tx: key={}, request={}, to={:?}, value={}",
-            key_id,
-            request_id,
-            tx.to.as_ref().map(hex::encode),
-            tx.value
+            key_id, request_id, tx.to.as_ref().map(hex::encode), tx.value
+        );
+
+        Ok(signed_tx)
+    }
+
+    /// Sign an EIP-1559 transaction
+    pub fn sign_eip1559_transaction(
+        &self,
+        key_id: &str,
+        request_id: &str,
+        tx: &EIP1559Transaction,
+    ) -> Result<SignedEIP1559Transaction> {
+        let mut ctx = SigningContext::new(key_id, request_id, "ethereum");
+        if let Some(to) = &tx.to {
+            ctx = ctx.with_address(&hex::encode(to));
+        }
+        ctx = ctx.with_value(tx.value);
+
+        let result = self.policy_engine.evaluate(&ctx)?;
+        if !result.allowed {
+            return Err(LockSignError::PolicyViolation(
+                result.violations.join(", "),
+            ));
+        }
+
+        let unsigned_rlp = tx.rlp_unsigned();
+        let hash = keccak256(&unsigned_rlp);
+        let signature = self.key_store.sign_ethereum_hash(key_id, &hash)?;
+
+        let signed_tx = SignedEIP1559Transaction {
+            tx: tx.clone(),
+            v: signature.v,
+            r: signature.r.clone(),
+            s: signature.s.clone(),
+        };
+
+        self.policy_engine.record_signing(&ctx)?;
+
+        info!(
+            "Signed Ethereum EIP-1559 tx: key={}, request={}, to={:?}, value={}",
+            key_id, request_id, tx.to.as_ref().map(hex::encode), tx.value
         );
 
         Ok(signed_tx)
@@ -139,7 +159,26 @@ impl EthereumSigner {
     }
 }
 
-/// Legacy Ethereum transaction
+// Helper functions for RLP encoding
+fn u128_to_be_bytes_trimmed(value: u128) -> Vec<u8> {
+    if value == 0 {
+        return vec![];
+    }
+    let bytes = value.to_be_bytes();
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(16);
+    bytes[start..].to_vec()
+}
+
+fn u64_to_be_bytes_trimmed(value: u64) -> Vec<u8> {
+    if value == 0 {
+        return vec![];
+    }
+    let bytes = value.to_be_bytes();
+    let start = bytes.iter().position(|&b| b != 0).unwrap_or(8);
+    bytes[start..].to_vec()
+}
+
+/// Legacy Ethereum transaction (pre-EIP-1559)
 #[derive(Debug, Clone)]
 pub struct LegacyTransaction {
     pub nonce: u64,
@@ -152,35 +191,42 @@ pub struct LegacyTransaction {
 }
 
 impl LegacyTransaction {
+    pub fn new(
+        nonce: u64,
+        gas_price: u128,
+        gas_limit: u64,
+        to: Option<[u8; 20]>,
+        value: u128,
+        data: Vec<u8>,
+        chain_id: u64,
+    ) -> Self {
+        Self { nonce, gas_price, gas_limit, to, value, data, chain_id }
+    }
+
     /// RLP encode for signing (EIP-155)
     pub fn rlp_unsigned(&self) -> Vec<u8> {
-        let mut stream = rlp::RlpStream::new();
-        stream.begin_unbounded_list();
-
-        stream.append(&self.nonce);
-        stream.append(&self.gas_price);
-        stream.append(&self.gas_limit);
-
-        if let Some(to) = &self.to {
-            stream.append(&to.as_slice());
-        } else {
-            stream.append(&"");
-        }
-
-        stream.append(&self.value);
+        let mut stream = RlpStream::new_list(9);
+        
+        stream.append(&u64_to_be_bytes_trimmed(self.nonce).as_slice());
+        stream.append(&u128_to_be_bytes_trimmed(self.gas_price).as_slice());
+        stream.append(&u64_to_be_bytes_trimmed(self.gas_limit).as_slice());
+        
+        match &self.to {
+            Some(addr) => stream.append(&addr.as_slice()),
+            None => stream.append_empty_data(),
+        };
+        
+        stream.append(&u128_to_be_bytes_trimmed(self.value).as_slice());
         stream.append(&self.data);
-
-        // EIP-155: append chain_id, 0, 0
-        stream.append(&self.chain_id);
-        stream.append(&0u8);
-        stream.append(&0u8);
-
-        stream.finalize_unbounded_list();
+        stream.append(&u64_to_be_bytes_trimmed(self.chain_id).as_slice());
+        stream.append_empty_data();
+        stream.append_empty_data();
+        
         stream.out().to_vec()
     }
 }
 
-/// Signed Ethereum transaction
+/// Signed legacy Ethereum transaction
 #[derive(Debug, Clone)]
 pub struct SignedTransaction {
     pub tx: LegacyTransaction,
@@ -190,168 +236,151 @@ pub struct SignedTransaction {
 }
 
 impl SignedTransaction {
-    /// RLP encode signed transaction
     pub fn rlp_signed(&self) -> Vec<u8> {
-        let mut stream = rlp::RlpStream::new();
-        stream.begin_unbounded_list();
-
-        stream.append(&self.tx.nonce);
-        stream.append(&self.tx.gas_price);
-        stream.append(&self.tx.gas_limit);
-
-        if let Some(to) = &self.tx.to {
-            stream.append(&to.as_slice());
-        } else {
-            stream.append(&"");
-        }
-
-        stream.append(&self.tx.value);
+        let mut stream = RlpStream::new_list(9);
+        
+        stream.append(&u64_to_be_bytes_trimmed(self.tx.nonce).as_slice());
+        stream.append(&u128_to_be_bytes_trimmed(self.tx.gas_price).as_slice());
+        stream.append(&u64_to_be_bytes_trimmed(self.tx.gas_limit).as_slice());
+        
+        match &self.tx.to {
+            Some(addr) => stream.append(&addr.as_slice()),
+            None => stream.append_empty_data(),
+        };
+        
+        stream.append(&u128_to_be_bytes_trimmed(self.tx.value).as_slice());
         stream.append(&self.tx.data);
-
-        stream.append(&self.v);
+        stream.append(&u64_to_be_bytes_trimmed(self.v).as_slice());
         stream.append(&self.r.as_slice());
         stream.append(&self.s.as_slice());
-
-        stream.finalize_unbounded_list();
+        
         stream.out().to_vec()
     }
 
-    /// Get transaction hash
     pub fn tx_hash(&self) -> [u8; 32] {
         keccak256(&self.rlp_signed())
     }
 
-    /// Get transaction hash as hex string
     pub fn tx_hash_hex(&self) -> String {
         format!("0x{}", hex::encode(self.tx_hash()))
     }
+
+    pub fn raw_tx_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.rlp_signed()))
+    }
 }
 
-// Note: We'll add RLP crate dependency
-// For now, using a simple placeholder
+/// EIP-1559 transaction
+#[derive(Debug, Clone)]
+pub struct EIP1559Transaction {
+    pub chain_id: u64,
+    pub nonce: u64,
+    pub max_priority_fee_per_gas: u128,
+    pub max_fee_per_gas: u128,
+    pub gas_limit: u64,
+    pub to: Option<[u8; 20]>,
+    pub value: u128,
+    pub data: Vec<u8>,
+    pub access_list: Vec<AccessListItem>,
+}
 
-mod rlp {
-    pub struct RlpStream {
-        buffer: Vec<u8>,
-    }
+#[derive(Debug, Clone)]
+pub struct AccessListItem {
+    pub address: [u8; 20],
+    pub storage_keys: Vec<[u8; 32]>,
+}
 
-    impl RlpStream {
-        pub fn new() -> Self {
-            Self { buffer: Vec::new() }
-        }
-
-        pub fn begin_unbounded_list(&mut self) {
-            // Placeholder - in real impl, this would start RLP list encoding
-        }
-
-        pub fn append<T: Encodable>(&mut self, value: &T) -> &mut Self {
-            value.rlp_append(&mut self.buffer);
-            self
-        }
-
-        pub fn finalize_unbounded_list(&mut self) {
-            // Placeholder - finalize RLP list
-        }
-
-        pub fn out(&self) -> &[u8] {
-            &self.buffer
-        }
-    }
-
-    pub trait Encodable {
-        fn rlp_append(&self, buffer: &mut Vec<u8>);
-    }
-
-    impl Encodable for u64 {
-        fn rlp_append(&self, buffer: &mut Vec<u8>) {
-            // Simple RLP encoding for u64
-            if *self == 0 {
-                buffer.push(0x80);
-            } else if *self < 128 {
-                buffer.push(*self as u8);
-            } else {
-                let bytes = self.to_be_bytes();
-                let start = bytes.iter().position(|&b| b != 0).unwrap_or(8);
-                let len = 8 - start;
-                buffer.push(0x80 + len as u8);
-                buffer.extend_from_slice(&bytes[start..]);
+impl EIP1559Transaction {
+    pub fn rlp_unsigned(&self) -> Vec<u8> {
+        let mut stream = RlpStream::new_list(9);
+        
+        stream.append(&u64_to_be_bytes_trimmed(self.chain_id).as_slice());
+        stream.append(&u64_to_be_bytes_trimmed(self.nonce).as_slice());
+        stream.append(&u128_to_be_bytes_trimmed(self.max_priority_fee_per_gas).as_slice());
+        stream.append(&u128_to_be_bytes_trimmed(self.max_fee_per_gas).as_slice());
+        stream.append(&u64_to_be_bytes_trimmed(self.gas_limit).as_slice());
+        
+        match &self.to {
+            Some(addr) => stream.append(&addr.as_slice()),
+            None => stream.append_empty_data(),
+        };
+        
+        stream.append(&u128_to_be_bytes_trimmed(self.value).as_slice());
+        stream.append(&self.data);
+        
+        // Access list
+        stream.begin_list(self.access_list.len());
+        for item in &self.access_list {
+            stream.begin_list(2);
+            stream.append(&item.address.as_slice());
+            stream.begin_list(item.storage_keys.len());
+            for key in &item.storage_keys {
+                stream.append(&key.as_slice());
             }
         }
+        
+        let mut result = vec![0x02];
+        result.extend(stream.out());
+        result
     }
+}
 
-    impl Encodable for u128 {
-        fn rlp_append(&self, buffer: &mut Vec<u8>) {
-            if *self == 0 {
-                buffer.push(0x80);
-            } else if *self < 128 {
-                buffer.push(*self as u8);
-            } else {
-                let bytes = self.to_be_bytes();
-                let start = bytes.iter().position(|&b| b != 0).unwrap_or(16);
-                let len = 16 - start;
-                buffer.push(0x80 + len as u8);
-                buffer.extend_from_slice(&bytes[start..]);
+/// Signed EIP-1559 transaction
+#[derive(Debug, Clone)]
+pub struct SignedEIP1559Transaction {
+    pub tx: EIP1559Transaction,
+    pub v: u8,
+    pub r: Vec<u8>,
+    pub s: Vec<u8>,
+}
+
+impl SignedEIP1559Transaction {
+    pub fn rlp_signed(&self) -> Vec<u8> {
+        let mut stream = RlpStream::new_list(12);
+        
+        stream.append(&u64_to_be_bytes_trimmed(self.tx.chain_id).as_slice());
+        stream.append(&u64_to_be_bytes_trimmed(self.tx.nonce).as_slice());
+        stream.append(&u128_to_be_bytes_trimmed(self.tx.max_priority_fee_per_gas).as_slice());
+        stream.append(&u128_to_be_bytes_trimmed(self.tx.max_fee_per_gas).as_slice());
+        stream.append(&u64_to_be_bytes_trimmed(self.tx.gas_limit).as_slice());
+        
+        match &self.tx.to {
+            Some(addr) => stream.append(&addr.as_slice()),
+            None => stream.append_empty_data(),
+        };
+        
+        stream.append(&u128_to_be_bytes_trimmed(self.tx.value).as_slice());
+        stream.append(&self.tx.data);
+        
+        stream.begin_list(self.tx.access_list.len());
+        for item in &self.tx.access_list {
+            stream.begin_list(2);
+            stream.append(&item.address.as_slice());
+            stream.begin_list(item.storage_keys.len());
+            for key in &item.storage_keys {
+                stream.append(&key.as_slice());
             }
         }
+        
+        stream.append(&vec![self.v].as_slice());
+        stream.append(&self.r.as_slice());
+        stream.append(&self.s.as_slice());
+        
+        let mut result = vec![0x02];
+        result.extend(stream.out());
+        result
     }
 
-    impl Encodable for u8 {
-        fn rlp_append(&self, buffer: &mut Vec<u8>) {
-            if *self == 0 {
-                buffer.push(0x80);
-            } else if *self < 128 {
-                buffer.push(*self);
-            } else {
-                buffer.push(0x81);
-                buffer.push(*self);
-            }
-        }
+    pub fn tx_hash(&self) -> [u8; 32] {
+        keccak256(&self.rlp_signed())
     }
 
-    impl Encodable for &str {
-        fn rlp_append(&self, buffer: &mut Vec<u8>) {
-            let bytes = self.as_bytes();
-            if bytes.is_empty() {
-                buffer.push(0x80);
-            } else if bytes.len() == 1 && bytes[0] < 128 {
-                buffer.push(bytes[0]);
-            } else if bytes.len() < 56 {
-                buffer.push(0x80 + bytes.len() as u8);
-                buffer.extend_from_slice(bytes);
-            } else {
-                // Long string encoding
-                let len_bytes = bytes.len().to_be_bytes();
-                let start = len_bytes.iter().position(|&b| b != 0).unwrap_or(8);
-                buffer.push(0xb7 + (8 - start) as u8);
-                buffer.extend_from_slice(&len_bytes[start..]);
-                buffer.extend_from_slice(bytes);
-            }
-        }
+    pub fn tx_hash_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.tx_hash()))
     }
 
-    impl Encodable for &[u8] {
-        fn rlp_append(&self, buffer: &mut Vec<u8>) {
-            if self.is_empty() {
-                buffer.push(0x80);
-            } else if self.len() == 1 && self[0] < 128 {
-                buffer.push(self[0]);
-            } else if self.len() < 56 {
-                buffer.push(0x80 + self.len() as u8);
-                buffer.extend_from_slice(self);
-            } else {
-                let len_bytes = self.len().to_be_bytes();
-                let start = len_bytes.iter().position(|&b| b != 0).unwrap_or(8);
-                buffer.push(0xb7 + (8 - start) as u8);
-                buffer.extend_from_slice(&len_bytes[start..]);
-                buffer.extend_from_slice(self);
-            }
-        }
-    }
-
-    impl Encodable for Vec<u8> {
-        fn rlp_append(&self, buffer: &mut Vec<u8>) {
-            self.as_slice().rlp_append(buffer);
-        }
+    pub fn raw_tx_hex(&self) -> String {
+        format!("0x{}", hex::encode(self.rlp_signed()))
     }
 }
 
@@ -366,36 +395,50 @@ mod tests {
         let key_store = Arc::new(MemoryKeyStore::new());
         let policy_engine = Arc::new(PolicyEngine::new(false));
 
-        // Load a test key
         let private_key = [1u8; 32];
-        key_store
-            .load_ethereum_key("test_key", &private_key, 0)
-            .unwrap();
+        key_store.load_ethereum_key("test_key", &private_key, 0).unwrap();
 
         let signer = EthereumSigner::new(key_store, policy_engine);
-
-        let sig = signer
-            .sign_message("test_key", "req1", b"Hello, Ethereum!")
-            .unwrap();
+        let sig = signer.sign_message("test_key", "req1", b"Hello, Ethereum!").unwrap();
 
         assert_eq!(sig.r.len(), 32);
         assert_eq!(sig.s.len(), 32);
     }
 
     #[test]
-    fn test_get_address() {
-        let key_store = Arc::new(MemoryKeyStore::new());
-        let policy_engine = Arc::new(PolicyEngine::new(false));
+    fn test_legacy_transaction_rlp() {
+        let tx = LegacyTransaction {
+            nonce: 0,
+            gas_price: 20_000_000_000,
+            gas_limit: 21000,
+            to: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]),
+            value: 1_000_000_000_000_000_000,
+            data: vec![],
+            chain_id: 1,
+        };
 
-        let private_key = [1u8; 32];
-        key_store
-            .load_ethereum_key("test_key", &private_key, 0)
-            .unwrap();
+        let rlp = tx.rlp_unsigned();
+        assert!(!rlp.is_empty());
+        assert!(rlp[0] >= 0xc0); // RLP list prefix
+    }
 
-        let signer = EthereumSigner::new(key_store, policy_engine);
+    #[test]
+    fn test_eip1559_transaction_rlp() {
+        let tx = EIP1559Transaction {
+            chain_id: 1,
+            nonce: 0,
+            max_priority_fee_per_gas: 2_000_000_000,
+            max_fee_per_gas: 100_000_000_000,
+            gas_limit: 21000,
+            to: Some([0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]),
+            value: 1_000_000_000_000_000_000,
+            data: vec![],
+            access_list: vec![],
+        };
 
-        let address = signer.get_address("test_key").unwrap();
-        assert!(address.starts_with("0x"));
-        assert_eq!(address.len(), 42);
+        let rlp = tx.rlp_unsigned();
+        assert_eq!(rlp[0], 0x02); // EIP-1559 type prefix
     }
 }

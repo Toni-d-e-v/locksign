@@ -6,5 +6,8 @@
 pub mod ethereum;
 pub mod solana;
 
-pub use ethereum::{EthereumSigner, LegacyTransaction, SignedTransaction};
+pub use ethereum::{
+    AccessListItem, EIP1559Transaction, EthereumSigner, LegacyTransaction,
+    SignedEIP1559Transaction, SignedTransaction,
+};
 pub use solana::SolanaSigner;

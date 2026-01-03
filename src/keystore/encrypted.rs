@@ -13,6 +13,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use base64::{engine::general_purpose::STANDARD, Engine};
 
 /// Salt size for Argon2
 const SALT_SIZE: usize = 16;
@@ -64,7 +65,7 @@ impl EncryptedKeyFile {
         // Generate random salt
         let mut salt_bytes = [0u8; SALT_SIZE];
         rand::thread_rng().fill_bytes(&mut salt_bytes);
-        let salt = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, salt_bytes);
+        let salt = STANDARD.encode(salt_bytes);
 
         // Derive encryption key using Argon2id
         let encryption_key = derive_key(password, &salt_bytes)?;
@@ -73,7 +74,7 @@ impl EncryptedKeyFile {
         let mut nonce_bytes = [0u8; NONCE_SIZE];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, nonce_bytes);
+            STANDARD.encode(nonce_bytes);
 
         // Encrypt the private key
         let cipher = Aes256Gcm::new_from_slice(&encryption_key)
@@ -84,7 +85,7 @@ impl EncryptedKeyFile {
             .map_err(|e| LockSignError::EncryptionFailed(e.to_string()))?;
 
         let ciphertext_b64 =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ciphertext);
+            STANDARD.encode(&ciphertext);
 
         Ok(Self {
             version: 1,
@@ -102,7 +103,7 @@ impl EncryptedKeyFile {
     /// Decrypt the private key
     pub fn decrypt(&self, password: &str) -> Result<Vec<u8>> {
         // Decode salt
-        let salt_bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &self.salt)
+        let salt_bytes = STANDARD.decode(&self.salt)
             .map_err(|e| LockSignError::DecryptionFailed(format!("Invalid salt: {}", e)))?;
 
         // Derive decryption key
@@ -110,12 +111,12 @@ impl EncryptedKeyFile {
 
         // Decode nonce
         let nonce_bytes =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &self.nonce)
+            STANDARD.decode( &self.nonce)
                 .map_err(|e| LockSignError::DecryptionFailed(format!("Invalid nonce: {}", e)))?;
 
         // Decode ciphertext
         let ciphertext =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &self.ciphertext)
+             STANDARD.decode( &self.ciphertext)
                 .map_err(|e| {
                     LockSignError::DecryptionFailed(format!("Invalid ciphertext: {}", e))
                 })?;

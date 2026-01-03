@@ -1,0 +1,30 @@
+[server]
+listen_addr = "127.0.0.1"
+port = 50051
+use_unix_socket = false
+unix_socket = "/var/run/locksign/locksign.sock"
+tls_enabled = false
+# tls_cert = "/etc/locksign/server.crt"
+# tls_key = "/etc/locksign/server.key"
+max_connections = 100
+
+[storage]
+keystore_path = "./data/keys"
+encryption_algorithm = "aes-256-gcm"
+kdf_iterations = 100000
+
+[security]
+enable_mlock = true
+disable_core_dumps = true
+max_key_age_days = 0  # 0 = no limit
+require_master_password = true
+
+[policy]
+enabled = true
+rules_path = "./config/policies.json"
+default_daily_limit = 1000000000000000000  # 1 ETH in wei
+
+[logging]
+level = "info"  # trace, debug, info, warn, error
+format = "pretty"  # pretty, json
+# file = "/var/log/locksign/locksign.log"
