@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package locksign.ethereum;
+
+import "common.proto";
+
+// Ethereum signing service
+service EthereumSigner {
+  // Sign a raw Ethereum transaction
+  rpc SignTransaction(EthSignTransactionRequest) returns (EthSignTransactionResponse);
+  
+  // Sign an arbitrary message (EIP-191 personal sign)
+  rpc SignMessage(EthSignMessageRequest) returns (locksign.common.Signature);
+  
+  // Sign typed data (EIP-712)
+  rpc SignTypedData(EthSignTypedDataRequest) returns (locksign.common.Signature);
+  
+  // Get the Ethereum address for a key
+  rpc GetAddress(EthGetAddressRequest) returns (EthGetAddressResponse);
+}
+
+// Raw transaction to sign
+message EthTransaction {
+  uint64 nonce = 1;
+  bytes gas_price = 2;         // big-endian bytes
+  uint64 gas_limit = 3;
+  bytes to = 4;                // 20 bytes, empty for contract creation
+  bytes value = 5;             // big-endian bytes
+  bytes data = 6;              // input data
+  uint64 chain_id = 7;
+}
+
+// EIP-1559 transaction
+message EthEIP1559Transaction {
+  uint64 chain_id = 1;
+  uint64 nonce = 2;
+  bytes max_priority_fee_per_gas = 3;
+  bytes max_fee_per_gas = 4;
+  uint64 gas_limit = 5;
+  bytes to = 6;
+  bytes value = 7;
+  bytes data = 8;
+  repeated AccessListItem access_list = 9;
+}
+
+message AccessListItem {
+  bytes address = 1;           // 20 bytes
+  repeated bytes storage_keys = 2;  // 32 bytes each
+}
+
+message EthSignTransactionRequest {
+  string key_id = 1;
+  string request_id = 2;
+  oneof transaction {
+    EthTransaction legacy_tx = 3;
+    EthEIP1559Transaction eip1559_tx = 4;
+  }
+}
+
+message EthSignTransactionResponse {
+  bytes signed_transaction = 1;  // RLP-encoded signed transaction
+  string tx_hash = 2;            // transaction hash (hex)
+  uint32 v = 3;
+  bytes r = 4;
+  bytes s = 5;
+}
+
+message EthSignMessageRequest {
+  string key_id = 1;
+  string request_id = 2;
+  bytes message = 3;           // raw message (will be prefixed with "\x19Ethereum Signed Message:\n")
+}
+
+message EthSignTypedDataRequest {
+  string key_id = 1;
+  string request_id = 2;
+  string typed_data_json = 3;  // EIP-712 typed data as JSON
+}
+
+message EthGetAddressRequest {
+  string key_id = 1;
+}
+
+message EthGetAddressResponse {
+  string address = 1;          // checksummed address (0x...)
+  string public_key = 2;       // uncompressed public key (hex)
+}

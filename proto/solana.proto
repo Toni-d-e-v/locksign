@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package locksign.solana;
+
+import "common.proto";
+
+// Solana signing service
+service SolanaSigner {
+  // Sign a Solana transaction
+  rpc SignTransaction(SolSignTransactionRequest) returns (SolSignTransactionResponse);
+  
+  // Sign an arbitrary message
+  rpc SignMessage(SolSignMessageRequest) returns (locksign.common.Signature);
+  
+  // Get the Solana public key for a key
+  rpc GetPublicKey(SolGetPublicKeyRequest) returns (SolGetPublicKeyResponse);
+  
+  // Partially sign a transaction (for multi-sig scenarios)
+  rpc PartialSign(SolPartialSignRequest) returns (SolPartialSignResponse);
+}
+
+message SolSignTransactionRequest {
+  string key_id = 1;
+  string request_id = 2;
+  bytes transaction = 3;       // serialized transaction (without signatures)
+  string recent_blockhash = 4; // optional: if empty, uses the one in transaction
+}
+
+message SolSignTransactionResponse {
+  bytes signed_transaction = 1;  // fully signed transaction
+  bytes signature = 2;           // the signature bytes (64 bytes)
+}
+
+message SolSignMessageRequest {
+  string key_id = 1;
+  string request_id = 2;
+  bytes message = 3;           // raw message bytes
+}
+
+message SolGetPublicKeyRequest {
+  string key_id = 1;
+}
+
+message SolGetPublicKeyResponse {
+  string public_key = 1;       // base58-encoded public key
+  bytes public_key_bytes = 2;  // raw 32 bytes
+}
+
+message SolPartialSignRequest {
+  string key_id = 1;
+  string request_id = 2;
+  bytes transaction = 3;       // partially signed transaction
+}
+
+message SolPartialSignResponse {
+  bytes transaction = 1;       // transaction with additional signature
+  bytes signature = 2;
+}

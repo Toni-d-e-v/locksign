@@ -1,0 +1,72 @@
+syntax = "proto3";
+
+package locksign.common;
+
+// Generic signature response
+message Signature {
+  bytes signature = 1;
+  string public_key = 2;  // hex-encoded
+}
+
+// Generic sign request for arbitrary messages
+message SignRequest {
+  string key_id = 1;           // identifier for the key to use
+  bytes message = 2;           // raw message bytes to sign
+  string request_id = 3;       // unique request ID for audit
+}
+
+// Key management
+message KeyInfo {
+  string key_id = 1;
+  string public_key = 2;       // hex-encoded
+  string chain = 3;            // "ethereum" or "solana"
+  int64 created_at = 4;        // unix timestamp
+  bool enabled = 5;
+}
+
+message ListKeysRequest {}
+
+message ListKeysResponse {
+  repeated KeyInfo keys = 1;
+}
+
+message GetKeyRequest {
+  string key_id = 1;
+}
+
+message ImportKeyRequest {
+  string key_id = 1;
+  bytes encrypted_private_key = 2;
+  string chain = 3;            // "ethereum" or "solana"
+}
+
+message ImportKeyResponse {
+  string key_id = 1;
+  string public_key = 2;
+}
+
+message DeleteKeyRequest {
+  string key_id = 1;
+}
+
+message DeleteKeyResponse {
+  bool success = 1;
+}
+
+// Policy types
+message PolicyRule {
+  string rule_id = 1;
+  string key_id = 2;
+  string rule_type = 3;        // "allowlist", "limit", "2fa"
+  string config = 4;           // JSON config for the rule
+  bool enabled = 5;
+}
+
+// Status/health
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  int32 keys_loaded = 2;
+  int64 uptime_seconds = 3;
+}
